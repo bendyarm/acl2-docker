@@ -108,8 +108,11 @@ RUN echo '#!/bin/sh' > /usr/local/bin/sbcl-acl2 && \
     echo 'exec /usr/local/bin/sbcl --dynamic-space-size 4000 "$@"' >> /usr/local/bin/sbcl-acl2 && \
     chmod +x /usr/local/bin/sbcl-acl2
 
-# Build ACL2
-RUN make LISP=/usr/local/bin/sbcl-acl2
+# Test that SBCL works before building
+RUN /usr/local/bin/sbcl-acl2 --version
+
+# Build ACL2 (show make.log on failure for debugging)
+RUN make LISP=/usr/local/bin/sbcl-acl2 || (cat make.log && exit 1)
 
 # Generate certdep files and detect ACL2 features.
 # This is a lightweight alternative to "make basic" (which certifies books).
