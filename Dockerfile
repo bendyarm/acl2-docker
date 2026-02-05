@@ -72,9 +72,14 @@ WORKDIR /root
 # The default "master" is used when building locally without --build-arg.
 ARG ACL2_COMMIT=master
 
-# Clone ACL2 with shallow history (--depth 1 saves ~1.6 GB vs full clone)
+# Clone ACL2 at specific commit with shallow history
+# Note: --branch doesn't work with commit hashes, so we use init+fetch+checkout
 # Git is included so users can run "git pull" to update ACL2 inside the container.
-RUN git clone --depth 1 --branch ${ACL2_COMMIT} https://github.com/acl2/acl2.git acl2
+RUN git init acl2 \
+    && cd acl2 \
+    && git remote add origin https://github.com/acl2/acl2.git \
+    && git fetch --depth 1 origin ${ACL2_COMMIT} \
+    && git checkout FETCH_HEAD
 
 # --------------------------------------------------------------------------
 # ALTERNATIVE: Zipball download (smaller image, no git required)
