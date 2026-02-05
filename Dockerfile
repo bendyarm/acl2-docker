@@ -7,7 +7,9 @@
 #   SBCL_VERSION - SBCL version to build (default: 2.6.1)
 #   ACL2_COMMIT  - ACL2 commit/tag/branch to build (default: master)
 
-ARG SBCL_VERSION=2.6.1
+# Note: 2.6.1 fails on Linux ARM64 with floating-point trap issues
+# Trying 2.5.3
+ARG SBCL_VERSION=2.5.3
 
 # =============================================================================
 # Stage 1: Build SBCL from source
@@ -18,11 +20,13 @@ ARG SBCL_VERSION
 
 # Install bootstrap SBCL from apt (works for both amd64 and arm64)
 # plus build dependencies
+# libzstd-dev is required for --fancy flag (zstd core compression)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     ca-certificates \
     zlib1g-dev \
+    libzstd-dev \
     bzip2 \
     sbcl \
     && rm -rf /var/lib/apt/lists/*
@@ -33,13 +37,13 @@ WORKDIR /build
 # SHA256 computed from SourceForge download on 2025-02-04
 RUN curl -fsSL "https://downloads.sourceforge.net/project/sbcl/sbcl/${SBCL_VERSION}/sbcl-${SBCL_VERSION}-source.tar.bz2" \
     -o sbcl-source.tar.bz2 \
-    && echo "5f2cd5bb7d3e6d9149a59c05acd8429b3be1849211769e5a37451d001e196d7f  sbcl-source.tar.bz2" | sha256sum -c - \
+    && echo "8a1e76e75bb73eaec2df1ee0541aab646caa1042c71e256aaa67f7aff3ab16d5  sbcl-source.tar.bz2" | sha256sum -c - \
     && tar xjf sbcl-source.tar.bz2 \
     && rm sbcl-source.tar.bz2
 
 # Build SBCL with ACL2-recommended switches
 # See ACL2 xdoc topic SBCL-INSTALLATION for details
-# --fancy enables optional features including proper FP exception handling on ARM64
+# --fancy enables optional features (which might include better FP exception handling on Microsoft's ARM64 runner)
 WORKDIR /build/sbcl-${SBCL_VERSION}
 RUN sh make.sh \
       --without-immobile-space \
