@@ -1,0 +1,258 @@
+# Build Multi-Platform ACL2 Docker Images
+#
+# This workflow builds Docker images for linux/amd64 and linux/arm64
+# using native GitHub runners (no QEMU emulation).
+#
+# The ACL2 source is downloaded from acl2/acl2 via GitHub API,
+# independent of this repository's contents.
+#
+# Images are tagged with the ACL2 commit hash and optionally an additional tag.
+# Build provenance attestation is generated for supply chain security.
+
+name: Build Multi-Platform ACL2 Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      acl2_ref:
+        description: 'ACL2 ref to build (leave empty for latest master)'
+        required: false
+        default: ''
+      additional_tag:
+        description: 'Additional image tag (optional, e.g., "latest")'
+        required: false
+        default: ''
+      push_to_registry:
+        description: 'Push to registries?'
+        type: boolean
+        default: false
+
+env:
+  REGISTRY_GHCR: ghcr.io
+  # For bendyarm testing; change to kestrelinstitute for production
+  IMAGE_NAME: bendyarm/acl2
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write       # For Sigstore signing
+  attestations: write   # To store attestation
+
+jobs:
+  # ==========================================================================
+  # Job 1: Resolve ACL2 commit hash
+  # ==========================================================================
+  resolve-commit:
+    runs-on: ubuntu-latest
+    outputs:
+      acl2_commit: ${{ steps.resolve.outputs.commit }}
+      acl2_commit_short: ${{ steps.resolve.outputs.commit_short }}
+    steps:
+      - name: Resolve ACL2 commit hash
+        id: resolve
+        run: |
+          REF="${{ inputs.acl2_ref }}"
+          if [ -z "$REF" ]; then
+            REF="master"
+          fi
+          echo "Resolving ref: ${REF}"
+
+          # Get the full commit hash for this ref
+          RESPONSE=$(curl -sL "https://api.github.com/repos/acl2/acl2/commits/${REF}")
+          COMMIT=$(echo "$RESPONSE" | jq -r '.sha')
+
+          if [ "$COMMIT" = "null" ] || [ -z "$COMMIT" ]; then
+            echo "Failed to resolve ref: ${REF}"
+            echo "API response: $RESPONSE"
+            exit 1
+          fi
+
+          echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
+          echo "commit_short=${COMMIT:0:7}" >> $GITHUB_OUTPUT
+          echo "Resolved ${REF} to ${COMMIT}"
+
+  # ==========================================================================
+  # Job 2 & 3: Build on native runners (parallel)
+  # ==========================================================================
+  build:
+    needs: resolve-commit
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            platform_tag: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            platform_tag: arm64
+    runs-on: ${{ matrix.runner }}
+    outputs:
+      digest-amd64: ${{ steps.export.outputs.digest-amd64 }}
+      digest-arm64: ${{ steps.export.outputs.digest-arm64 }}
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # TODO: Add Docker Hub login when DOCKERHUB_USERNAME secret is configured
+      # (Can't conditionally check if secrets exist in workflow expressions)
+
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          # ACL2_SNAPSHOT_INFO is not needed when using git clone (ACL2 auto-detects version)
+          # If switching to zipball method in Dockerfile, uncomment this line:
+          #   ACL2_SNAPSHOT_INFO=Git commit: ${{ needs.resolve-commit.outputs.acl2_commit }}
+          build-args: |
+            ACL2_COMMIT=${{ needs.resolve-commit.outputs.acl2_commit }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.resolve-commit.outputs.acl2_commit }}
+            org.opencontainers.image.source=https://github.com/acl2/acl2
+            org.opencontainers.image.description=ACL2 ${{ needs.resolve-commit.outputs.acl2_commit_short }} on SBCL
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+          outputs: type=image,name=${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ inputs.push_to_registry }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export digest
+        id: export
+        if: ${{ inputs.push_to_registry }}
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          echo "Digest: $digest"
+          touch "/tmp/digests/${digest#sha256:}"
+          echo "digest-${{ matrix.platform_tag }}=${digest}" >> $GITHUB_OUTPUT
+
+      - name: Upload digest artifact
+        if: ${{ inputs.push_to_registry }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform_tag }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  # ==========================================================================
+  # Job 4: Merge into multi-platform manifest
+  # ==========================================================================
+  merge:
+    needs: [resolve-commit, build]
+    runs-on: ubuntu-latest
+    if: ${{ inputs.push_to_registry }}
+    outputs:
+      digest: ${{ steps.inspect.outputs.digest }}
+    steps:
+      - name: Download digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # TODO: Add Docker Hub login when DOCKERHUB_USERNAME secret is configured
+
+      - name: Create manifest and push to GHCR
+        id: push
+        working-directory: /tmp/digests
+        run: |
+          # Build tag arguments
+          TAGS="-t ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.acl2_commit_short }}"
+
+          if [ -n "${{ inputs.additional_tag }}" ]; then
+            TAGS="$TAGS -t ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${{ inputs.additional_tag }}"
+          fi
+
+          # Create and push manifest
+          docker buildx imagetools create $TAGS \
+            $(printf '${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Get manifest digest
+        id: inspect
+        run: |
+          DIGEST=$(docker buildx imagetools inspect ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.acl2_commit_short }} --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+          echo "Manifest digest: ${DIGEST}"
+
+      # TODO: Push to Docker Hub when secrets are configured
+      # - name: Push to Docker Hub
+      #   if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+      #   run: |
+      #     ...
+
+  # ==========================================================================
+  # Job 5: Generate build provenance attestation
+  # ==========================================================================
+  attest:
+    needs: [resolve-commit, merge]
+    runs-on: ubuntu-latest
+    if: ${{ inputs.push_to_registry }}
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ needs.merge.outputs.digest }}
+          push-to-registry: true
+
+  # ==========================================================================
+  # Job 6: Summary
+  # ==========================================================================
+  summary:
+    needs: [resolve-commit, build, merge, attest]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Print summary
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ACL2 Commit | \`${{ needs.resolve-commit.outputs.acl2_commit }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| ACL2 Commit (short) | \`${{ needs.resolve-commit.outputs.acl2_commit_short }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Push to Registry | ${{ inputs.push_to_registry }} |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.push_to_registry }}" = "true" ]; then
+            echo "| Image | \`${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.acl2_commit_short }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Manifest Digest | \`${{ needs.merge.outputs.digest }}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -n "${{ inputs.additional_tag }}" ]; then
+            echo "| Additional Tag | \`${{ inputs.additional_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Verification" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To verify the build attestation:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "gh attestation verify oci://${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.acl2_commit_short }} --owner ${{ github.repository_owner }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
