@@ -101,10 +101,11 @@ RUN git init acl2 \
 
 WORKDIR /root/acl2
 
-# Create SBCL wrapper script with ACL2's recommended settings
-# --dynamic-space-size 32000 is required for full regression (see acl2-init.lisp)
+# Create SBCL wrapper script for building ACL2
+# Use 4GB for build phase (GitHub runners have ~7GB RAM)
+# Users can set higher values at runtime for full regressions (32GB recommended)
 RUN echo '#!/bin/sh' > /usr/local/bin/sbcl-acl2 && \
-    echo 'exec /usr/local/bin/sbcl --dynamic-space-size 32000 "$@"' >> /usr/local/bin/sbcl-acl2 && \
+    echo 'exec /usr/local/bin/sbcl --dynamic-space-size 4000 "$@"' >> /usr/local/bin/sbcl-acl2 && \
     chmod +x /usr/local/bin/sbcl-acl2
 
 # Build ACL2
