@@ -39,11 +39,13 @@ RUN curl -fsSL "https://downloads.sourceforge.net/project/sbcl/sbcl/${SBCL_VERSI
 
 # Build SBCL with ACL2-recommended switches
 # See ACL2 xdoc topic SBCL-INSTALLATION for details
+# --fancy enables optional features including proper FP exception handling on ARM64
 WORKDIR /build/sbcl-${SBCL_VERSION}
 RUN sh make.sh \
       --without-immobile-space \
       --without-immobile-code \
       --without-compact-instance-header \
+      --fancy \
       --prefix=/usr/local
 
 RUN sh install.sh
