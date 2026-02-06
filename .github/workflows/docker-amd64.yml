@@ -1,0 +1,181 @@
+# Build ACL2 Docker Image (amd64 only)
+#
+# This workflow builds the amd64 image on GitHub with SLSA attestation.
+# The arm64 image must be built locally on Apple Silicon and merged manually.
+#
+# See scripts/build-arm64-and-merge.sh for the local arm64 build process.
+#
+# Why amd64 only? SBCL on Linux ARM64 doesn't support floating-point exception
+# traps that ACL2 requires. See docker-multiplatform.yml for full explanation.
+
+name: Build ACL2 Docker (amd64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      acl2_ref:
+        description: 'ACL2 ref to build (leave empty for latest master)'
+        required: false
+        default: ''
+      additional_tag:
+        description: 'Additional image tag (optional, e.g., "latest")'
+        required: false
+        default: ''
+      push_to_registry:
+        description: 'Push to registry?'
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  # For bendyarm testing; change to kestrelinstitute for production
+  IMAGE_NAME: bendyarm/acl2
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write       # For Sigstore signing
+  attestations: write   # To store attestation
+
+jobs:
+  # ==========================================================================
+  # Job 1: Resolve ACL2 commit hash
+  # ==========================================================================
+  resolve-commit:
+    runs-on: ubuntu-latest
+    outputs:
+      acl2_commit: ${{ steps.resolve.outputs.commit }}
+      acl2_commit_short: ${{ steps.resolve.outputs.commit_short }}
+    steps:
+      - name: Resolve ACL2 commit hash
+        id: resolve
+        run: |
+          REF="${{ inputs.acl2_ref }}"
+          if [ -z "$REF" ]; then
+            REF="master"
+          fi
+          echo "Resolving ref: ${REF}"
+
+          # Get the full commit hash for this ref
+          RESPONSE=$(curl -sL "https://api.github.com/repos/acl2/acl2/commits/${REF}")
+          COMMIT=$(echo "$RESPONSE" | jq -r '.sha')
+
+          if [ "$COMMIT" = "null" ] || [ -z "$COMMIT" ]; then
+            echo "Failed to resolve ref: ${REF}"
+            echo "API response: $RESPONSE"
+            exit 1
+          fi
+
+          echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
+          echo "commit_short=${COMMIT:0:7}" >> $GITHUB_OUTPUT
+          echo "Resolved ${REF} to ${COMMIT}"
+
+  # ==========================================================================
+  # Job 2: Build amd64 image
+  # ==========================================================================
+  build-amd64:
+    needs: resolve-commit
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push amd64 image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            ACL2_COMMIT=${{ needs.resolve-commit.outputs.acl2_commit }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.resolve-commit.outputs.acl2_commit }}
+            org.opencontainers.image.source=https://github.com/acl2/acl2
+            org.opencontainers.image.description=ACL2 ${{ needs.resolve-commit.outputs.acl2_commit_short }} on SBCL (amd64)
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ inputs.push_to_registry }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ==========================================================================
+  # Job 3: Generate build provenance attestation (amd64 only)
+  # ==========================================================================
+  attest-amd64:
+    needs: [resolve-commit, build-amd64]
+    runs-on: ubuntu-latest
+    if: ${{ inputs.push_to_registry }}
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate attestation for amd64
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ needs.build-amd64.outputs.digest }}
+          push-to-registry: true
+
+  # ==========================================================================
+  # Job 4: Summary with instructions for local arm64 build
+  # ==========================================================================
+  summary:
+    needs: [resolve-commit, build-amd64, attest-amd64]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Print summary and next steps
+        run: |
+          echo "## Build Summary (amd64)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ACL2 Commit | \`${{ needs.resolve-commit.outputs.acl2_commit }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| ACL2 Commit (short) | \`${{ needs.resolve-commit.outputs.acl2_commit_short }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Push to Registry | ${{ inputs.push_to_registry }} |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.push_to_registry }}" = "true" ]; then
+            echo "| amd64 Digest | \`${{ needs.build-amd64.outputs.digest }}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ inputs.push_to_registry }}" = "true" ]; then
+            echo "## Next Steps: Build arm64 locally" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Run this on an Apple Silicon Mac to build arm64 and create multi-platform manifest:" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+            echo "cd ~/bendyarm/acl2-docker" >> $GITHUB_STEP_SUMMARY
+            echo "./scripts/build-arm64-and-merge.sh \\\\" >> $GITHUB_STEP_SUMMARY
+            echo "  --acl2-commit ${{ needs.resolve-commit.outputs.acl2_commit }} \\\\" >> $GITHUB_STEP_SUMMARY
+            echo "  --amd64-digest ${{ needs.build-amd64.outputs.digest }} \\\\" >> $GITHUB_STEP_SUMMARY
+            echo "  --tag ${{ needs.resolve-commit.outputs.acl2_commit_short }}" >> $GITHUB_STEP_SUMMARY
+            if [ -n "${{ inputs.additional_tag }}" ]; then
+              echo "  --additional-tag ${{ inputs.additional_tag }}" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Verification (after arm64 merge)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Verify amd64 attestation:" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+            echo "gh attestation verify oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-amd64.outputs.digest }} --owner ${{ github.repository_owner }}" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Note:** Only the amd64 image has SLSA attestation. The arm64 image is built locally." >> $GITHUB_STEP_SUMMARY
+          fi

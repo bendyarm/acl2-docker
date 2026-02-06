@@ -3,20 +3,29 @@
 # Multi-platform Dockerfile for ACL2 on SBCL
 # Builds for linux/amd64 and linux/arm64
 #
-# Build arguments:
-#   SBCL_VERSION - SBCL version to build (default: 2.6.1)
+# =============================================================================
+# SBCL VERSION CONFIGURATION
+# =============================================================================
+# To update SBCL version, change BOTH of these values together.
+# To compute SHA256: curl -fsSL "<url>" | shasum -a 256
+#
+ARG SBCL_VERSION=2.6.1
+ARG SBCL_SHA256=5f2cd5bb7d3e6d9149a59c05acd8429b3be1849211769e5a37451d001e196d7f
+# =============================================================================
+#
+# Other build arguments:
 #   ACL2_COMMIT  - ACL2 commit/tag/branch to build (default: master)
-
-# Note: 2.6.1 fails on Linux ARM64 with floating-point trap issues
-# Trying 2.5.3
-ARG SBCL_VERSION=2.5.3
 
 # =============================================================================
 # Stage 1: Build SBCL from source
 # =============================================================================
 FROM ubuntu:24.04 AS sbcl-builder
 
+# Import ARGs and persist as ENV for use throughout this stage
 ARG SBCL_VERSION
+ARG SBCL_SHA256
+ENV SBCL_VERSION=${SBCL_VERSION}
+ENV SBCL_SHA256=${SBCL_SHA256}
 
 # Install bootstrap SBCL from apt (works for both amd64 and arm64)
 # plus build dependencies
@@ -34,22 +43,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 
 # Download SBCL source and verify checksum
-# SHA256 computed from SourceForge download on 2025-02-04
-RUN curl -fsSL "https://downloads.sourceforge.net/project/sbcl/sbcl/${SBCL_VERSION}/sbcl-${SBCL_VERSION}-source.tar.bz2" \
-    -o sbcl-source.tar.bz2 \
-    && echo "8a1e76e75bb73eaec2df1ee0541aab646caa1042c71e256aaa67f7aff3ab16d5  sbcl-source.tar.bz2" | sha256sum -c - \
-    && tar xjf sbcl-source.tar.bz2 \
-    && rm sbcl-source.tar.bz2
+# (If version and SHA256 don't match, this will fail)
+RUN echo "Downloading SBCL ${SBCL_VERSION}..." && \
+    curl -fsSL "https://downloads.sourceforge.net/project/sbcl/sbcl/${SBCL_VERSION}/sbcl-${SBCL_VERSION}-source.tar.bz2" \
+    -o sbcl-source.tar.bz2 && \
+    echo "Verifying SHA256: ${SBCL_SHA256}" && \
+    echo "${SBCL_SHA256}  sbcl-source.tar.bz2" | sha256sum -c - && \
+    tar xjf sbcl-source.tar.bz2 && \
+    rm sbcl-source.tar.bz2
 
 # Build SBCL with ACL2-recommended switches
 # See ACL2 xdoc topic SBCL-INSTALLATION for details
-# --fancy enables optional features (which might include better FP exception handling on Microsoft's ARM64 runner)
+# --fancy enables core compression (requires libzstd-dev) and other optional features
+# --dynamic-space-size=4Gb is sufficient for building ACL2; users can increase at runtime
 WORKDIR /build/sbcl-${SBCL_VERSION}
 RUN sh make.sh \
       --without-immobile-space \
       --without-immobile-code \
       --without-compact-instance-header \
       --fancy \
+      --dynamic-space-size=4Gb \
       --prefix=/usr/local
 
 RUN sh install.sh

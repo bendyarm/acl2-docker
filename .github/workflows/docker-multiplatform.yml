@@ -1,5 +1,39 @@
-# Build Multi-Platform ACL2 Docker Images
+# =============================================================================
+# CURRENTLY BROKEN - DO NOT USE
+# =============================================================================
 #
+# This workflow is intended to build Docker images for linux/amd64 and linux/arm64
+# using native GitHub runners (no QEMU emulation).
+#
+# PROBLEM: The ARM64 build fails because SBCL on Linux ARM64 (GitHub's ubuntu-24.04-arm
+# runner using Microsoft Cobalt 100 processors) does not support floating-point
+# exception traps, which ACL2 requires.
+#
+# Error message:
+#   "This Lisp is unsuitable for ACL2, because it failed a check that
+#    floating-point overflow causes an error."
+#
+# Root cause: SBCL's float-trap.lisp only enables FP trap handling for:
+#   - Darwin ARM64 (macOS Apple Silicon)
+#   - Linux x86-64
+# It does NOT include Linux ARM64.
+# See: https://github.com/sbcl/sbcl/blob/master/src/code/float-trap.lisp
+#
+# Why mister-walter's acl2-docker works: He builds ARM64 images on an Apple Silicon
+# Mac running Docker Desktop. The Linux container runs in a VM using Apple's
+# virtualization framework, which is effectively Darwin ARM64 (supported).
+# GitHub's ARM64 runners are native Linux on Microsoft Cobalt processors (unsupported).
+#
+# TO FIX: Either wait for SBCL to add Linux ARM64 FP trap support, or use a
+# self-hosted Apple Silicon runner. GitHub's macOS ARM64 runners don't support
+# Docker (nested virtualization not available).
+#
+# WORKAROUND: Use docker-amd64.yml for GitHub builds (amd64 with attestation),
+# then build ARM64 locally on Apple Silicon and merge with scripts/build-arm64-and-merge.sh
+#
+# =============================================================================
+#
+# Original description:
 # This workflow builds Docker images for linux/amd64 and linux/arm64
 # using native GitHub runners (no QEMU emulation).
 #
@@ -9,7 +43,7 @@
 # Images are tagged with the ACL2 commit hash and optionally an additional tag.
 # Build provenance attestation is generated for supply chain security.
 
-name: Build Multi-Platform ACL2 Docker Images
+name: Build Multi-Platform ACL2 Docker Images (BROKEN - see comments)
 
 on:
   workflow_dispatch:
