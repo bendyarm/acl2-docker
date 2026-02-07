@@ -16,17 +16,17 @@ on:
   workflow_dispatch:
     inputs:
       acl2_ref:
-        description: 'ACL2 ref to build (empty = latest master, also tagged "latest")'
+        description: 'ACL2 ref/commit to build (usually left blank, meaning latest master)'
         required: false
         default: ''
       additional_tag:
-        description: 'Extra tag (empty master builds auto-tag "latest")'
+        description: 'Extra tag (usually left blank)'
         required: false
         default: ''
       push_to_registry:
         description: 'Push to registry?'
         type: boolean
-        default: false
+        default: true
 
 env:
   REGISTRY: ghcr.io
