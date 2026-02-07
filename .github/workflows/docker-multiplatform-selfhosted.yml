@@ -16,11 +16,11 @@ on:
   workflow_dispatch:
     inputs:
       acl2_ref:
-        description: 'ACL2 ref to build (leave empty for latest master)'
+        description: 'ACL2 ref to build (empty = latest master, also tagged "latest")'
         required: false
         default: ''
       additional_tag:
-        description: 'Additional image tag (optional, e.g., "latest")'
+        description: 'Extra tag (empty master builds auto-tag "latest")'
         required: false
         default: ''
       push_to_registry:
@@ -48,15 +48,20 @@ jobs:
     outputs:
       acl2_commit: ${{ steps.resolve.outputs.commit }}
       acl2_commit_short: ${{ steps.resolve.outputs.commit_short }}
+      build_type: ${{ steps.resolve.outputs.build_type }}
+      image_tag: ${{ steps.resolve.outputs.image_tag }}
     steps:
       - name: Resolve ACL2 commit hash
         id: resolve
         run: |
           REF="${{ inputs.acl2_ref }}"
-          if [ -z "$REF" ]; then
+          if [ -z "$REF" ] || [ "$REF" = "master" ]; then
             REF="master"
+            BUILD_TYPE="master"
+          else
+            BUILD_TYPE="commit"
           fi
-          echo "Resolving ref: ${REF}"
+          echo "Resolving ref: ${REF} (build_type: ${BUILD_TYPE})"
 
           RESPONSE=$(curl -sL "https://api.github.com/repos/acl2/acl2/commits/${REF}")
           COMMIT=$(echo "$RESPONSE" | jq -r '.sha')
@@ -67,9 +72,14 @@ jobs:
             exit 1
           fi
 
+          COMMIT_SHORT="${COMMIT:0:7}"
+          IMAGE_TAG="${BUILD_TYPE}-${COMMIT_SHORT}"
+
           echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
-          echo "commit_short=${COMMIT:0:7}" >> $GITHUB_OUTPUT
-          echo "Resolved ${REF} to ${COMMIT}"
+          echo "commit_short=${COMMIT_SHORT}" >> $GITHUB_OUTPUT
+          echo "build_type=${BUILD_TYPE}" >> $GITHUB_OUTPUT
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "Resolved ${REF} to ${COMMIT} (tag: ${IMAGE_TAG})"
 
   # ==========================================================================
   # Job 2: Build amd64 image (GitHub-hosted runner)
@@ -102,10 +112,11 @@ jobs:
           platforms: linux/amd64
           build-args: |
             ACL2_COMMIT=${{ needs.resolve-commit.outputs.acl2_commit }}
+            ACL2_BUILD_TYPE=${{ needs.resolve-commit.outputs.build_type }}
           labels: |
             org.opencontainers.image.revision=${{ needs.resolve-commit.outputs.acl2_commit }}
             org.opencontainers.image.source=https://github.com/acl2/acl2
-            org.opencontainers.image.description=ACL2 ${{ needs.resolve-commit.outputs.acl2_commit_short }} on SBCL
+            org.opencontainers.image.description=ACL2 ${{ needs.resolve-commit.outputs.image_tag }} on SBCL
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ inputs.push_to_registry }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -143,10 +154,11 @@ jobs:
           platforms: linux/arm64
           build-args: |
             ACL2_COMMIT=${{ needs.resolve-commit.outputs.acl2_commit }}
+            ACL2_BUILD_TYPE=${{ needs.resolve-commit.outputs.build_type }}
           labels: |
             org.opencontainers.image.revision=${{ needs.resolve-commit.outputs.acl2_commit }}
             org.opencontainers.image.source=https://github.com/acl2/acl2
-            org.opencontainers.image.description=ACL2 ${{ needs.resolve-commit.outputs.acl2_commit_short }} on SBCL
+            org.opencontainers.image.description=ACL2 ${{ needs.resolve-commit.outputs.image_tag }} on SBCL
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ inputs.push_to_registry }}
           # Note: GitHub Actions cache (type=gha) may not work on self-hosted runners
           # Use local cache instead
@@ -204,10 +216,16 @@ jobs:
       - name: Create and push multi-platform manifest
         id: manifest
         run: |
-          # Construct tags
-          TAGS="-t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.acl2_commit_short }}"
+          # Construct tags (e.g., master-abc1234 or commit-abc1234)
+          TAGS="-t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.image_tag }}"
+
+          # Add additional tag if specified
           if [ -n "${{ inputs.additional_tag }}" ]; then
             TAGS="$TAGS -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.additional_tag }}"
+          # Auto-add "latest" for default master builds (empty ref and empty additional_tag)
+          elif [ -z "${{ inputs.acl2_ref }}" ]; then
+            TAGS="$TAGS -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            echo "Auto-adding 'latest' tag for default master build"
           fi
 
           # Create manifest from the two platform-specific images
@@ -216,7 +234,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-arm64.outputs.digest }}
 
           # Get the manifest digest
-          MANIFEST_DIGEST=$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.acl2_commit_short }} --format '{{json .Manifest.Digest}}' | tr -d '"')
+          MANIFEST_DIGEST=$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.image_tag }} --format '{{json .Manifest.Digest}}' | tr -d '"')
           echo "digest=${MANIFEST_DIGEST}" >> $GITHUB_OUTPUT
           echo "Created manifest with digest: ${MANIFEST_DIGEST}"
 
@@ -235,7 +253,13 @@ jobs:
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| ACL2 Commit | \`${{ needs.resolve-commit.outputs.acl2_commit }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| ACL2 Commit (short) | \`${{ needs.resolve-commit.outputs.acl2_commit_short }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Type | \`${{ needs.resolve-commit.outputs.build_type }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image Tag | \`${{ needs.resolve-commit.outputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ inputs.additional_tag }}" ]; then
+            echo "| Additional Tag | \`${{ inputs.additional_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          elif [ -z "${{ inputs.acl2_ref }}" ]; then
+            echo "| Additional Tag | \`latest\` (auto) |" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "| Push to Registry | ${{ inputs.push_to_registry }} |" >> $GITHUB_STEP_SUMMARY
 
           if [ "${{ inputs.push_to_registry }}" = "true" ]; then
@@ -248,12 +272,27 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
             echo "# Pull multi-platform image (auto-selects architecture)" >> $GITHUB_STEP_SUMMARY
-            echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.acl2_commit_short }}" >> $GITHUB_STEP_SUMMARY
+            echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "# Or by manifest digest" >> $GITHUB_STEP_SUMMARY
             echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.create-manifest.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
+
+            if [ "${{ needs.resolve-commit.outputs.build_type }}" = "master" ]; then
+              echo "## Updating ACL2" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "This is a \`master\` build. Inside the container, you can update ACL2 with:" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+              echo "cd /root/acl2 && git pull origin master" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "## Git Status" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "This is a \`commit\` build (detached HEAD). See INSTALL.md for updating instructions." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
 
             echo "## Verification" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
@@ -265,7 +304,7 @@ jobs:
 
             echo "Inspect manifest:" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-            echo "docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.acl2_commit_short }}" >> $GITHUB_STEP_SUMMARY
+            echo "docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-commit.outputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           fi
 

@@ -86,19 +86,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /root
 
-# ACL2 version argument
-# The GitHub Action workflow supplies a value like ACL2_COMMIT=abc1234... (full commit hash)
-# The default "master" is used when building locally without --build-arg.
+# ACL2 version arguments
+# ACL2_COMMIT: The commit hash or ref to build (workflow passes full hash)
+# ACL2_BUILD_TYPE: "master" or "commit" - controls git branch setup
+#   - master: sets up local master branch with upstream tracking (git pull works)
+#   - commit: leaves as detached HEAD (for non-master refs)
 ARG ACL2_COMMIT=master
+ARG ACL2_BUILD_TYPE=master
 
-# Clone ACL2 at specific commit with shallow history
-# Note: --branch doesn't work with commit hashes, so we use init+fetch+checkout
-# Git is included so users can run "git pull" to update ACL2 inside the container.
-RUN git init acl2 \
-    && cd acl2 \
-    && git remote add origin https://github.com/acl2/acl2.git \
-    && git fetch --depth 1 origin ${ACL2_COMMIT} \
-    && git checkout FETCH_HEAD
+# Clone ACL2 with shallow history
+# Git is included so users can update ACL2 inside the container.
+RUN git init acl2 && \
+    cd acl2 && \
+    git remote add origin https://github.com/acl2/acl2.git && \
+    git fetch --depth 1 origin ${ACL2_COMMIT} && \
+    if [ "${ACL2_BUILD_TYPE}" = "master" ]; then \
+      git update-ref refs/remotes/origin/master FETCH_HEAD && \
+      git checkout -b master FETCH_HEAD && \
+      git branch --set-upstream-to=origin/master master; \
+    else \
+      git checkout FETCH_HEAD; \
+    fi
 
 # --------------------------------------------------------------------------
 # ALTERNATIVE: Zipball download (smaller image, no git required)
