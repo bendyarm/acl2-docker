@@ -128,6 +128,11 @@ RUN git init acl2 && \
 
 WORKDIR /root/acl2
 
+# Apply patch: allow 1-second tolerance in fasl/cert timestamp comparisons
+# to work around filesystem timestamp granularity races in Docker/WSL2
+COPY fix-fasl-cert-timestamp-race.patch .
+RUN patch -p1 < fix-fasl-cert-timestamp-race.patch
+
 # Create SBCL wrapper script for building ACL2
 # Use 4GB for build phase (GitHub runners have ~7GB RAM)
 # Users can set higher values at runtime for full regressions (32GB recommended)
