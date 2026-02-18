@@ -130,7 +130,7 @@ WORKDIR /root/acl2
 
 # Apply patch: allow 1-second tolerance in fasl/cert timestamp comparisons
 # to work around filesystem timestamp granularity races in Docker/WSL2
-COPY fix-fasl-cert-timestamp-race.patch .
+COPY compile-on-wsl.patch .
 RUN patch -p1 < compile-on-wsl.patch
 
 # Create SBCL wrapper script for building ACL2
