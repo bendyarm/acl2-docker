@@ -1,0 +1,102 @@
+diff --git a/acl2-init.lisp b/acl2-init.lisp
+index 96d99469c0..dda966e9ae 100644
+--- a/acl2-init.lisp
++++ b/acl2-init.lisp
+@@ -1497,9 +1497,27 @@ THISSCRIPTDIR=\"$( cd \"$( dirname \"$absdir\" )\" && pwd -P )\"
+            (t (format nil "+ (a development snapshot based on ~a)"
+                       *copy-of-acl2-version*)))))
+ 
++(defvar *wsl*
++
++; This variable is intended to be non-nil when running in Windows Subsystem for
++; Linux.  We set it when ACL2 starts up; see acl2-default-restart.  We use it
++; in the implementation of certify-book to prevent an issue with
++; file-write-dates, as noted in a comment where this variable is accessed.
++
++  nil)
++
+ (defun acl2-default-restart (&optional called-by-lp)
+   (if *acl2-default-restart-complete*
+       (return-from acl2-default-restart nil))
++  (setq *wsl*
++
++; This code is courtesy of hints from Eric McCarthy and perplexity.com.
++; The value is true when we are running under Windows Subsystem for
++; Linux.
++
++        (ignore-errors
++          (with-open-file (s "/proc/version")
++            (search "microsoft" (string-downcase (read-line s nil ""))))))
+   #+cmu
+   (when *print-startup-banner*
+     (extensions::print-herald t))
+diff --git a/other-events.lisp b/other-events.lisp
+index 86f9114980..82e370da64 100644
+--- a/other-events.lisp
++++ b/other-events.lisp
+@@ -17891,6 +17891,8 @@
+                    (new-fns (top-level-user-fns cltl-command-stack nil))
+                    (cert-data-pass2 (cert-data-for-certificate
+                                      new-fns translate-cert-data wrld2))
++                   #-acl2-loop-only
++                   os-expansion-filename ; may be modified below in raw Lisp
+                    (pkg-names
+ 
+ ; Warning: If the following comment is modified or deleted, visit its reference
+@@ -18022,23 +18024,25 @@
+                                    expansion-alist pkg-names ev-lst
+                                    pass1-known-package-alist ctx state)
+                                   #-acl2-loop-only
+-                                  (let* ((os-expansion-filename
+-                                          (pathname-unix-to-os
+-                                           (expansion-filename
+-                                            full-book-string)
+-                                           state))
+-                                         (os-compiled-file
+-                                          (compile-certified-file
+-                                           os-expansion-filename
+-                                           full-book-string
+-                                           state)))
++                                  (let ((os-compiled-file
++                                         (progn
++                                           (setq os-expansion-filename
++                                                 (pathname-unix-to-os
++                                                  (expansion-filename
++                                                   full-book-string)
++                                                  state))
++                                           (compile-certified-file
++                                            os-expansion-filename
++                                            full-book-string
++                                            state))))
+                                     (when (not (f-get-global
+                                                 'save-expansion-file
+                                                 state))
+                                       (delete-expansion-file
+                                        os-expansion-filename
+                                        full-book-string
+-                                       state))
++                                       state)
++                                      (setq os-expansion-filename nil))
+                                     (value os-compiled-file)))))
+                                (t
+                                 #-acl2-loop-only
+@@ -18054,6 +18058,19 @@
+                                 (rename-file
+                                  (pathname-unix-to-os (car pair) state)
+                                  (pathname-unix-to-os (cdr pair) state)))
++                          (when *wsl*
++
++; Eric McCarthy has reported that when certifying a book with "ACL2 in Docker
++; image (platform linux/amd64) running on WSL2 (Windows Subsystem for Linux v2)
++; on Windows 11 host", the .cert file may be a bit newer than the compiled
++; file.  Perhaps rename-file is not preserving write dates; at any rate, we fix
++; the problem here, by ensuring that the compiled file and (if it exists) the
++; expansion file are more recent than the .cert file.
++
++                            (when os-expansion-filename
++                              (touch? os-expansion-filename nil ctx state))
++                            (when os-compiled-file
++                              (touch? os-compiled-file nil ctx state)))
+                           (when event-data-channel
+                             (let ((old (pathname-unix-to-os
+                                         (event-data-filename full-book-string
